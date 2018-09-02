@@ -30,7 +30,7 @@ import TextShow
 
 newtype UserId =
   UserId Int
-  deriving (Eq, Show)
+  deriving (Eq)
 
 newtype RoomId =
   RoomId Int
@@ -45,6 +45,13 @@ data ChatRoom = ChatRoom
   , chatRoomChannel :: ChatRoomChannel
   }
 
+data User = User
+  { userClients :: Int
+  , userChannel :: UserChannel
+  }
+
+type UserChannel = TChan ByteString
+
 type ChatRoomChannel = TChan ByteString
 
 newChatRoom :: Int -> STM ChatRoom
@@ -56,13 +63,13 @@ incrementClients room = room {chatRoomClients = chatRoomClients room + 1}
 decrementClients :: ChatRoom -> ChatRoom
 decrementClients room = room {chatRoomClients = chatRoomClients room - 1}
 
-data ClientMsg =
-  RoomMessage
+data ServerState = ServerState
+  { serverStateUsers :: Map UserId User
+  , serverStateRooms :: Map RoomId ChatRoom
+  }
 
-type ChatRoomsState = Map RoomId ChatRoom
-
-newChatRoomsState :: Map RoomId ChatRoom
-newChatRoomsState = M.empty
+newServerState :: ServerState
+newServerState = ServerState M.empty M.empty
 
 type Client = (Text, WS.Connection)
 
@@ -81,12 +88,12 @@ handleUserChannelMsg pubSubCtrl (UserId userId) action =
 getRoomIdFromRedisChannel :: ByteString -> Maybe RoomId
 getRoomIdFromRedisChannel redisChannel = Just (RoomId 123) -- TODO
 
-receiveGameMsgs :: TVar ChatRoomsState -> R.PMessageCallback
-receiveGameMsgs roomsStateVar redisChannel bytes =
+receiveGameMsgs :: TVar ServerState -> R.PMessageCallback
+receiveGameMsgs stateVar redisChannel bytes =
   atomically $ do
-    roomsState <- readTVar roomsStateVar
+    state <- readTVar stateVar
     let maybeRoomId = getRoomIdFromRedisChannel redisChannel
-    case maybeRoomId >>= (`M.lookup` roomsState) of
+    case maybeRoomId >>= (`M.lookup` serverStateRooms state) of
       Nothing -> pure ()
       Just room -> do
         let roomChannel = chatRoomChannel room
@@ -96,22 +103,21 @@ main :: IO ()
 main = do
   tid <- myThreadId
   print $ "main thread id: " <> show tid
-  roomsState <- newTVarIO newChatRoomsState
+  stateVar <- newTVarIO newServerState
   redisConnection <- R.checkedConnect R.defaultConnectInfo
-  pubSubCtrl <-
-    R.newPubSubController [] [("room:*", receiveGameMsgs roomsState)]
+  pubSubCtrl <- R.newPubSubController [] [("room:*", receiveGameMsgs stateVar)]
   T.putStrLn "Starting server"
   race_
     (WS.runServer "127.0.0.1" 9160 $
-     application redisConnection pubSubCtrl roomsState)
+     application redisConnection pubSubCtrl stateVar)
     (R.pubSubForever
        redisConnection
        pubSubCtrl
        (T.putStrLn "Redis pubsub active"))
 
 application ::
-     R.Connection -> R.PubSubController -> TVar ChatRoomsState -> WS.ServerApp
-application redisConnection pubSubCtrl roomsState pending = do
+     R.Connection -> R.PubSubController -> TVar ServerState -> WS.ServerApp
+application redisConnection pubSubCtrl stateVar pending = do
   tid <- myThreadId
   print $ "req thread id: " <> show tid
   conn <- WS.acceptRequest pending
@@ -132,7 +138,7 @@ application redisConnection pubSubCtrl roomsState pending = do
           (UserId 123)
           (race_
              (respondForever client clientChannels)
-             (talk client redisConnection pubSubCtrl clientChannels roomsState))
+             (talk client redisConnection pubSubCtrl clientChannels stateVar))
       where prefix = "Hi! I am "
             client = (T.drop (T.length prefix) msg, conn)
 
@@ -186,10 +192,9 @@ talk ::
   -> R.Connection
   -> R.PubSubController
   -> TVar ClientChannels
-  -> TVar ChatRoomsState
+  -> TVar ServerState
   -> IO ()
-talk (user, conn) redisConnection pubSubCtrl channelsState roomsState =
-  forever loop
+talk (user, conn) redisConnection pubSubCtrl channelsVar stateVar = forever loop
   where
     loop = do
       msg <- WS.receiveData conn :: IO Text
@@ -200,33 +205,46 @@ talk (user, conn) redisConnection pubSubCtrl channelsState roomsState =
               Nothing -> putStrLn "invalid join room request"
               Just roomId ->
                 atomically $ do
-                  rooms <- readTVar roomsState
+                  state <- readTVar stateVar
+                  let rooms = (serverStateRooms state)
                   case M.lookup roomId rooms of
                     Nothing -> do
                       room <- newChatRoom 1
-                      stmModifyTVar channelsState (addRoomChannel roomId room)
-                      writeTVar roomsState (M.insert roomId room rooms)
-                    Just room -> do
-                      stmModifyTVar channelsState (addRoomChannel roomId room)
+                      stmModifyTVar channelsVar (addRoomChannel roomId room)
                       writeTVar
-                        roomsState
-                        (M.adjust incrementClients roomId rooms)
+                        stateVar
+                        (state {serverStateRooms = M.insert roomId room rooms})
+                    Just room -> do
+                      stmModifyTVar channelsVar (addRoomChannel roomId room)
+                      writeTVar
+                        stateVar
+                        (state
+                         { serverStateRooms =
+                             M.adjust incrementClients roomId rooms
+                         })
           | "leave:" `T.isPrefixOf` msg ->
             case getRoomIdFromWsMsg msg of
               Nothing -> putStrLn "invalid leave room request"
               Just roomId ->
                 atomically $ do
-                  stmModifyTVar channelsState (removeRoomChannel roomId)
-                  rooms <- readTVar roomsState
+                  stmModifyTVar channelsVar (removeRoomChannel roomId)
+                  state <- readTVar stateVar
+                  let rooms = (serverStateRooms state)
                   case M.lookup roomId rooms of
                     Nothing -> pure ()
                     Just room ->
                       let clients = chatRoomClients room
                       in if clients > 1
                            then writeTVar
-                                  roomsState
-                                  (M.adjust decrementClients roomId rooms)
-                           else writeTVar roomsState (M.delete roomId rooms)
+                                  stateVar
+                                  (state
+                                   { serverStateRooms =
+                                       M.adjust decrementClients roomId rooms
+                                   })
+                           else writeTVar
+                                  stateVar
+                                  (state
+                                   {serverStateRooms = M.delete roomId rooms})
           | "room:" `T.isPrefixOf` msg -> do
             R.runRedis redisConnection $ R.publish "room:123" (encodeUtf8 msg)
             pure ()
