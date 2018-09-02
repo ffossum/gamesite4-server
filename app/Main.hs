@@ -36,21 +36,10 @@ newtype RoomId =
   RoomId Int
   deriving (Eq, Ord)
 
-data ChatRoomMsg
-  = ClientJoined UserId
-  | ClientLeft UserId
-
 data ChatRoom = ChatRoom
   { chatRoomClients :: Int
   , chatRoomChannel :: ChatRoomChannel
   }
-
-data User = User
-  { userClients :: Int
-  , userChannel :: UserChannel
-  }
-
-type UserChannel = TChan ByteString
 
 type ChatRoomChannel = TChan ByteString
 
@@ -63,18 +52,18 @@ incrementClients room = room {chatRoomClients = chatRoomClients room + 1}
 decrementClients :: ChatRoom -> ChatRoom
 decrementClients room = room {chatRoomClients = chatRoomClients room - 1}
 
-data ServerState = ServerState
-  { serverStateUsers :: Map UserId User
-  , serverStateRooms :: Map RoomId ChatRoom
+newtype ServerState = ServerState
+  { serverStateRooms :: Map RoomId ChatRoom
   }
 
 newServerState :: ServerState
-newServerState = ServerState M.empty M.empty
+newServerState = ServerState M.empty
 
 type Client = (Text, WS.Connection)
 
-handleUserChannelMsg :: R.PubSubController -> UserId -> IO () -> IO ()
-handleUserChannelMsg pubSubCtrl (UserId userId) action =
+handleUserRedisMsg ::
+     R.PubSubController -> TChan ByteString -> UserId -> IO () -> IO ()
+handleUserRedisMsg pubSubCtrl channel (UserId userId) action =
   bracket
     (R.addChannels pubSubCtrl [(channelName, callback)] [])
     id
@@ -82,8 +71,8 @@ handleUserChannelMsg pubSubCtrl (UserId userId) action =
   where
     channelName = encodeUtf8 $ "user:" <> showt userId
     callback bytes = do
-      T.putStrLn (decodeUtf8 bytes)
-      pure ()
+      T.putStrLn $ "handleUserRedisMsg: " <> (decodeUtf8 bytes)
+      atomically $ writeTChan channel bytes
 
 getRoomIdFromRedisChannel :: ByteString -> Maybe RoomId
 getRoomIdFromRedisChannel redisChannel = Just (RoomId 123) -- TODO
@@ -132,9 +121,12 @@ application redisConnection pubSubCtrl stateVar pending = do
           conn
           ("Name cannot contain punctuation or whitespace, and cannot be empty" :: Text)
       | otherwise -> do
-        clientChannels <- newClientChannels >>= newTVarIO
-        handleUserChannelMsg
+        personalBroadcastChan <- newBroadcastTChanIO
+        personalChan <- atomically $ dupTChan personalBroadcastChan
+        clientChannels <- newTVarIO (ClientChannels personalChan M.empty)
+        handleUserRedisMsg
           pubSubCtrl
+          personalBroadcastChan
           (UserId 123)
           (race_
              (respondForever client clientChannels)
@@ -152,11 +144,6 @@ data ClientChannels = ClientChannels
   { personalChannel :: TChan ByteString
   , roomChannels :: Map RoomId (TChan ByteString)
   }
-
-newClientChannels :: IO ClientChannels
-newClientChannels = do
-  personal <- newTChanIO
-  pure $ ClientChannels personal M.empty
 
 addRoomChannel :: RoomId -> ChatRoom -> ClientChannels -> STM ClientChannels
 addRoomChannel roomId room channels = do
@@ -178,8 +165,8 @@ respondForever (user, conn) channelsState =
     msg <-
       atomically $ do
         ClientChannels pc rcs <- readTVar channelsState
-        foldr (orElse . readTChan) retry rcs
-    T.putStrLn (decodeUtf8 msg)
+        readTChan pc `orElse` foldr (orElse . readTChan) retry rcs
+    T.putStrLn $ "respondForever: " <> (decodeUtf8 msg)
 
 stmModifyTVar :: TVar a -> (a -> STM a) -> STM ()
 stmModifyTVar var f = do
