@@ -1,0 +1,19 @@
+<html>
+
+<head>
+  <title>Haskell websocket test</title>
+</head>
+
+<body>
+</body>
+
+<script>
+  const ws = new WebSocket("ws://localhost:9160");
+  ws.onopen = () => {
+    const name = "user" + Math.floor(Math.random() * 1000);
+    ws.send("Hi! I am " + name);
+  }
+  console.log(ws);
+</script>
+
+</html>
