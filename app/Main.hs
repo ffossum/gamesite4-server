@@ -66,8 +66,6 @@ newChatRoomsState = M.empty
 
 type Client = (Text, WS.Connection)
 
-type ServerState = [Client]
-
 handleUserChannelMsg :: R.PubSubController -> UserId -> IO () -> IO ()
 handleUserChannelMsg pubSubCtrl (UserId userId) action =
   bracket
@@ -94,34 +92,10 @@ receiveGameMsgs roomsStateVar redisChannel bytes =
         let roomChannel = chatRoomChannel room
         writeTChan roomChannel bytes
 
-newServerState :: ServerState
-newServerState = []
-
-numClients :: ServerState -> Int
-numClients = length
-
-clientExists :: Client -> ServerState -> Bool
-clientExists client = any ((== fst client) . fst)
-
-addClient :: Client -> ServerState -> ServerState
-addClient client clients = client : clients
-
-removeClient :: Client -> ServerState -> ServerState
-removeClient client = filter ((/= fst client) . fst)
-
-broadcast :: Text -> ServerState -> IO ()
-broadcast message clients = do
-  T.putStrLn message
-  forM_ clients $ \(_, conn) -> WS.sendTextData conn message
-
-callback :: MVar ServerState -> ByteString -> IO ()
-callback state msg = readMVar state >>= broadcast (decodeUtf8 msg)
-
 main :: IO ()
 main = do
   tid <- myThreadId
   print $ "main thread id: " <> show tid
-  state <- newMVar newServerState
   roomsState <- newTVarIO newChatRoomsState
   redisConnection <- R.checkedConnect R.defaultConnectInfo
   pubSubCtrl <-
@@ -129,25 +103,20 @@ main = do
   T.putStrLn "Starting server"
   race_
     (WS.runServer "127.0.0.1" 9160 $
-     application redisConnection pubSubCtrl roomsState state)
+     application redisConnection pubSubCtrl roomsState)
     (R.pubSubForever
        redisConnection
        pubSubCtrl
        (T.putStrLn "Redis pubsub active"))
 
 application ::
-     R.Connection
-  -> R.PubSubController
-  -> TVar ChatRoomsState
-  -> MVar ServerState
-  -> WS.ServerApp
-application redisConnection pubSubCtrl roomsState state pending = do
+     R.Connection -> R.PubSubController -> TVar ChatRoomsState -> WS.ServerApp
+application redisConnection pubSubCtrl roomsState pending = do
   tid <- myThreadId
   print $ "req thread id: " <> show tid
   conn <- WS.acceptRequest pending
   WS.forkPingThread conn 30
   msg <- WS.receiveData conn
-  clients <- readMVar state
   case msg of
     _
       | not (prefix `T.isPrefixOf` msg) ->
@@ -156,38 +125,16 @@ application redisConnection pubSubCtrl roomsState state pending = do
         WS.sendTextData
           conn
           ("Name cannot contain punctuation or whitespace, and cannot be empty" :: Text)
-      | clientExists client clients ->
-        WS.sendTextData conn ("User already exists" :: Text)
-      | otherwise ->
-        flip finally disconnect $ do
-          clientChannels <- newClientChannels >>= newTVarIO
-          modifyMVar_ state $ \s -> do
-            let s' = addClient client s
-            WS.sendTextData conn $
-              "Welcome! Users: " <> T.intercalate ", " (map fst s)
-            broadcast (fst client <> " joined") s'
-            return s'
-          (handleUserChannelMsg
-             pubSubCtrl
-             (UserId 123)
-             (race_
-                (respondForever client clientChannels)
-                (talk
-                   client
-                   redisConnection
-                   pubSubCtrl
-                   clientChannels
-                   roomsState)))
+      | otherwise -> do
+        clientChannels <- newClientChannels >>= newTVarIO
+        handleUserChannelMsg
+          pubSubCtrl
+          (UserId 123)
+          (race_
+             (respondForever client clientChannels)
+             (talk client redisConnection pubSubCtrl clientChannels roomsState))
       where prefix = "Hi! I am "
             client = (T.drop (T.length prefix) msg, conn)
-            disconnect
-                -- Remove client and return new state
-             = do
-              s <-
-                modifyMVar state $ \s ->
-                  let s' = removeClient client s
-                  in return (s', s')
-              broadcast (fst client <> " disconnected") s
 
 getRoomIdFromWsMsg :: Text -> Maybe RoomId
 getRoomIdFromWsMsg _ = Just (RoomId 123)
