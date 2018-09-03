@@ -71,7 +71,7 @@ handleUserRedisMsg pubSubCtrl channel (UserId userId) action =
   where
     channelName = encodeUtf8 $ "user:" <> showt userId
     callback bytes = do
-      T.putStrLn $ "handleUserRedisMsg: " <> (decodeUtf8 bytes)
+      T.putStrLn $ "handleUserRedisMsg: " <> decodeUtf8 bytes
       atomically $ writeTChan channel bytes
 
 getRoomIdFromRedisChannel :: ByteString -> Maybe RoomId
@@ -166,7 +166,7 @@ respondForever (user, conn) channelsState =
       atomically $ do
         ClientChannels pc rcs <- readTVar channelsState
         readTChan pc `orElse` foldr (orElse . readTChan) retry rcs
-    T.putStrLn $ "respondForever: " <> (decodeUtf8 msg)
+    T.putStrLn $ "respondForever: " <> decodeUtf8 msg
 
 stmModifyTVar :: TVar a -> (a -> STM a) -> STM ()
 stmModifyTVar var f = do
