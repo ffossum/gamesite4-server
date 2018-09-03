@@ -25,16 +25,10 @@ import qualified Data.Text as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import qualified Data.Text.IO as T
 import qualified Database.Redis as R
+import Gamesite4.Domain.Room
+import Gamesite4.Domain.User
 import qualified Network.WebSockets as WS
 import TextShow
-
-newtype UserId =
-  UserId Int
-  deriving (Eq)
-
-newtype RoomId =
-  RoomId Int
-  deriving (Eq, Ord)
 
 data ChatRoom = ChatRoom
   { chatRoomClients :: Int
@@ -59,7 +53,10 @@ newtype ServerState = ServerState
 newServerState :: ServerState
 newServerState = ServerState M.empty
 
-type Client = (Text, WS.Connection)
+data Client = Client
+  { clientUserId :: UserId
+  , clientConnection :: WS.Connection
+  }
 
 handleUserRedisMsg ::
      R.PubSubController -> TChan ByteString -> UserId -> IO () -> IO ()
@@ -110,29 +107,18 @@ application redisConnection pubSubCtrl stateVar pending = do
   tid <- myThreadId
   print $ "req thread id: " <> show tid
   conn <- WS.acceptRequest pending
+  let client = Client (UserId 123) conn -- TODO client id
   WS.forkPingThread conn 30
-  msg <- WS.receiveData conn
-  case msg of
-    _
-      | not (prefix `T.isPrefixOf` msg) ->
-        WS.sendTextData conn ("Wrong announcement" :: Text)
-      | any ($ fst client) [T.null, T.any isPunctuation, T.any isSpace] ->
-        WS.sendTextData
-          conn
-          ("Name cannot contain punctuation or whitespace, and cannot be empty" :: Text)
-      | otherwise -> do
-        personalBroadcastChan <- newBroadcastTChanIO
-        personalChan <- atomically $ dupTChan personalBroadcastChan
-        clientChannels <- newTVarIO (ClientChannels personalChan M.empty)
-        handleUserRedisMsg
-          pubSubCtrl
-          personalBroadcastChan
-          (UserId 123)
-          (race_
-             (respondForever client clientChannels)
-             (talk client redisConnection pubSubCtrl clientChannels stateVar))
-      where prefix = "Hi! I am "
-            client = (T.drop (T.length prefix) msg, conn)
+  personalBroadcastChan <- newBroadcastTChanIO
+  personalChan <- atomically $ dupTChan personalBroadcastChan
+  clientChannels <- newTVarIO (ClientChannels personalChan M.empty)
+  handleUserRedisMsg
+    pubSubCtrl
+    personalBroadcastChan
+    (clientUserId client)
+    (race_
+       (respondForever client clientChannels)
+       (talk client redisConnection pubSubCtrl clientChannels stateVar))
 
 getRoomIdFromWsMsg :: Text -> Maybe RoomId
 getRoomIdFromWsMsg _ = Just (RoomId 123)
@@ -160,7 +146,7 @@ removeRoomChannel roomId channels =
     newRoomChannels = M.delete roomId oldRoomChannels
 
 respondForever :: Client -> TVar ClientChannels -> IO ()
-respondForever (user, conn) channelsState =
+respondForever client channelsState =
   forever $ do
     msg <-
       atomically $ do
@@ -181,10 +167,10 @@ talk ::
   -> TVar ClientChannels
   -> TVar ServerState
   -> IO ()
-talk (user, conn) redisConnection pubSubCtrl channelsVar stateVar = forever loop
+talk client redisConnection pubSubCtrl channelsVar stateVar = forever loop
   where
     loop = do
-      msg <- WS.receiveData conn :: IO Text
+      msg <- WS.receiveData (clientConnection client) :: IO Text
       case msg of
         _
           | "join:" `T.isPrefixOf` msg ->
