@@ -19,6 +19,7 @@ import qualified Data.Text.IO as T
 import qualified Database.Redis as R
 import Gamesite4.Domain.Room
 import Gamesite4.Domain.User
+import Gamesite4.Parsers (parseRoomId, parseUsername)
 import qualified Network.WebSockets as WS
 import TextShow
 
@@ -46,19 +47,20 @@ newServerState :: ServerState
 newServerState = ServerState M.empty
 
 data Client = Client
-  { clientUserId :: UserId
+  { clientUsername :: Username
   , clientConnection :: WS.Connection
   }
 
 handleUserRedisMsg ::
-     R.PubSubController -> TChan ByteString -> UserId -> IO () -> IO ()
-handleUserRedisMsg pubSubCtrl channel (UserId userId) action =
+     R.PubSubController -> TChan ByteString -> Username -> IO () -> IO ()
+handleUserRedisMsg pubSubCtrl channel (Username username) action = do
+  T.putStrLn $ decodeUtf8 ("channelName: " <> channelName)
   bracket
     (R.addChannels pubSubCtrl [(channelName, callback)] [])
     id
     (const action)
   where
-    channelName = encodeUtf8 $ "user:" <> showt userId
+    channelName = encodeUtf8 $ "user:" <> username
     callback bytes = do
       T.putStrLn $ "handleUserRedisMsg: " <> decodeUtf8 bytes
       atomically $ writeTChan channel bytes
@@ -95,24 +97,27 @@ application ::
      R.Connection -> R.PubSubController -> TVar ServerState -> WS.ServerApp
 application redisConnection pubSubCtrl stateVar pending = do
   conn <- WS.acceptRequest pending
-  let client = Client (UserId 123) conn -- TODO client id
-  WS.forkPingThread conn 30
-  personalBroadcastChan <- newBroadcastTChanIO
-  personalChan <- atomically $ dupTChan personalBroadcastChan
-  clientChannels <- newTVarIO (ClientState personalChan M.empty)
-  handleUserRedisMsg
-    pubSubCtrl
-    personalBroadcastChan
-    (clientUserId client)
-    (race_
-       (respondForever client clientChannels)
-       (receiveForever client redisConnection pubSubCtrl clientChannels stateVar))
-
-getRoomIdFromWsMsg :: Text -> Maybe RoomId
-getRoomIdFromWsMsg _ = Just (RoomId 123)
-
-getUserIdFromWsMsg :: Text -> Maybe UserId
-getUserIdFromWsMsg _ = Just (UserId 123)
+  msg <- WS.receiveData conn
+  case parseUsername msg of
+    Nothing -> pure ()
+    Just username -> do
+      let client = Client username conn -- TODO client id
+      WS.forkPingThread conn 30
+      personalBroadcastChan <- newBroadcastTChanIO
+      personalChan <- atomically $ dupTChan personalBroadcastChan
+      clientChannels <- newTVarIO (ClientState personalChan M.empty)
+      handleUserRedisMsg
+        pubSubCtrl
+        personalBroadcastChan
+        (clientUsername client)
+        (race_
+           (respondForever client clientChannels)
+           (receiveForever
+              client
+              redisConnection
+              pubSubCtrl
+              clientChannels
+              stateVar))
 
 data ClientState = ClientState
   { personalChannel :: TChan ByteString
@@ -163,7 +168,7 @@ receiveForever client redisConnection pubSubCtrl clientStateVar stateVar =
       case msg of
         _
           | "join:" `T.isPrefixOf` msg ->
-            case getRoomIdFromWsMsg msg of
+            case parseRoomId msg of
               Nothing -> putStrLn "invalid join room request"
               Just roomId ->
                 atomically $ do
@@ -185,7 +190,7 @@ receiveForever client redisConnection pubSubCtrl clientStateVar stateVar =
                              M.adjust incrementClients roomId rooms
                          })
           | "leave:" `T.isPrefixOf` msg ->
-            case getRoomIdFromWsMsg msg of
+            case parseRoomId msg of
               Nothing -> putStrLn "invalid leave room request"
               Just roomId ->
                 atomically $ do

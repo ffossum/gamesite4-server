@@ -22,8 +22,10 @@ description: Please see the README on GitHub at <https://github.com/ffossum/game
 dependencies:
   - base >= 4.7 && < 5
   - async
+  - attoparsec
   - bytestring
   - containers
+  - either
   - hedis
   - text
   - text-show
