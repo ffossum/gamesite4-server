@@ -2,24 +2,16 @@
 
 module Main where
 
-import Control.Concurrent
-       (MVar, modifyMVar, modifyMVar_, myThreadId, newMVar, readMVar,
-        threadDelay)
 import Control.Concurrent.Async
 import Control.Concurrent.STM
-       (STM, TChan, TVar, atomically, dupTChan, modifyTVar,
-        newBroadcastTChan, newBroadcastTChanIO, newTChanIO, newTVarIO,
-        orElse, readTChan, readTVar, readTVarIO, retry, writeTChan,
-        writeTVar)
-import Control.Exception
-       (SomeException, bracket, bracket_, catch, finally)
-import Control.Monad (forM_, forever)
+       (STM, TChan, TVar, atomically, dupTChan, newBroadcastTChan,
+        newBroadcastTChanIO, newTVarIO, orElse, readTChan, readTVar, retry,
+        writeTChan, writeTVar)
+import Control.Exception (bracket)
+import Control.Monad (forever)
 import Data.ByteString (ByteString)
-import Data.Char (isPunctuation, isSpace)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
-import Data.Set (Set)
-import qualified Data.Set as S
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
@@ -87,8 +79,6 @@ receiveGameMsgs stateVar redisChannel bytes =
 
 main :: IO ()
 main = do
-  tid <- myThreadId
-  print $ "main thread id: " <> show tid
   stateVar <- newTVarIO newServerState
   redisConnection <- R.checkedConnect R.defaultConnectInfo
   pubSubCtrl <- R.newPubSubController [] [("room:*", receiveGameMsgs stateVar)]
@@ -104,8 +94,6 @@ main = do
 application ::
      R.Connection -> R.PubSubController -> TVar ServerState -> WS.ServerApp
 application redisConnection pubSubCtrl stateVar pending = do
-  tid <- myThreadId
-  print $ "req thread id: " <> show tid
   conn <- WS.acceptRequest pending
   let client = Client (UserId 123) conn -- TODO client id
   WS.forkPingThread conn 30
@@ -219,9 +207,11 @@ talk client redisConnection pubSubCtrl channelsVar stateVar = forever loop
                                   (state
                                    {serverStateRooms = M.delete roomId rooms})
           | "room:" `T.isPrefixOf` msg -> do
-            R.runRedis redisConnection $ R.publish "room:123" (encodeUtf8 msg)
+            _ <-
+              R.runRedis redisConnection $ R.publish "room:123" (encodeUtf8 msg)
             pure ()
           | "user:" `T.isPrefixOf` msg -> do
-            R.runRedis redisConnection $ R.publish "user:123" (encodeUtf8 msg)
+            _ <-
+              R.runRedis redisConnection $ R.publish "user:123" (encodeUtf8 msg)
             pure ()
           | otherwise -> pure ()
