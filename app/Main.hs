@@ -99,14 +99,14 @@ application redisConnection pubSubCtrl stateVar pending = do
   WS.forkPingThread conn 30
   personalBroadcastChan <- newBroadcastTChanIO
   personalChan <- atomically $ dupTChan personalBroadcastChan
-  clientChannels <- newTVarIO (ClientChannels personalChan M.empty)
+  clientChannels <- newTVarIO (ClientState personalChan M.empty)
   handleUserRedisMsg
     pubSubCtrl
     personalBroadcastChan
     (clientUserId client)
     (race_
        (respondForever client clientChannels)
-       (talk client redisConnection pubSubCtrl clientChannels stateVar))
+       (receiveForever client redisConnection pubSubCtrl clientChannels stateVar))
 
 getRoomIdFromWsMsg :: Text -> Maybe RoomId
 getRoomIdFromWsMsg _ = Just (RoomId 123)
@@ -114,31 +114,31 @@ getRoomIdFromWsMsg _ = Just (RoomId 123)
 getUserIdFromWsMsg :: Text -> Maybe UserId
 getUserIdFromWsMsg _ = Just (UserId 123)
 
-data ClientChannels = ClientChannels
+data ClientState = ClientState
   { personalChannel :: TChan ByteString
   , roomChannels :: Map RoomId (TChan ByteString)
   }
 
-addRoomChannel :: RoomId -> ChatRoom -> ClientChannels -> STM ClientChannels
-addRoomChannel roomId room channels = do
-  let oldRoomChannels = roomChannels channels
+addRoomChannel :: RoomId -> ChatRoom -> ClientState -> STM ClientState
+addRoomChannel roomId room clientState = do
+  let oldRoomChannels = roomChannels clientState
   channel <- dupTChan $ chatRoomChannel room
   let newRoomChannels = M.insert roomId channel oldRoomChannels
-  pure $ channels {roomChannels = newRoomChannels}
+  pure $ clientState {roomChannels = newRoomChannels}
 
-removeRoomChannel :: RoomId -> ClientChannels -> STM ClientChannels
-removeRoomChannel roomId channels =
-  pure $ channels {roomChannels = newRoomChannels}
+removeRoomChannel :: RoomId -> ClientState -> STM ClientState
+removeRoomChannel roomId clientState =
+  pure $ clientState {roomChannels = newRoomChannels}
   where
-    oldRoomChannels = roomChannels channels
+    oldRoomChannels = roomChannels clientState
     newRoomChannels = M.delete roomId oldRoomChannels
 
-respondForever :: Client -> TVar ClientChannels -> IO ()
+respondForever :: Client -> TVar ClientState -> IO ()
 respondForever client channelsState =
   forever $ do
     msg <-
       atomically $ do
-        ClientChannels pc rcs <- readTVar channelsState
+        ClientState pc rcs <- readTVar channelsState
         readTChan pc `orElse` foldr (orElse . readTChan) retry rcs
     T.putStrLn $ "respondForever: " <> decodeUtf8 msg
 
@@ -148,14 +148,15 @@ stmModifyTVar var f = do
   new <- f old
   writeTVar var new
 
-talk ::
+receiveForever ::
      Client
   -> R.Connection
   -> R.PubSubController
-  -> TVar ClientChannels
+  -> TVar ClientState
   -> TVar ServerState
   -> IO ()
-talk client redisConnection pubSubCtrl channelsVar stateVar = forever loop
+receiveForever client redisConnection pubSubCtrl clientStateVar stateVar =
+  forever loop
   where
     loop = do
       msg <- WS.receiveData (clientConnection client) :: IO Text
@@ -171,12 +172,12 @@ talk client redisConnection pubSubCtrl channelsVar stateVar = forever loop
                   case M.lookup roomId rooms of
                     Nothing -> do
                       room <- newChatRoom 1
-                      stmModifyTVar channelsVar (addRoomChannel roomId room)
+                      stmModifyTVar clientStateVar (addRoomChannel roomId room)
                       writeTVar
                         stateVar
                         (state {serverStateRooms = M.insert roomId room rooms})
                     Just room -> do
-                      stmModifyTVar channelsVar (addRoomChannel roomId room)
+                      stmModifyTVar clientStateVar (addRoomChannel roomId room)
                       writeTVar
                         stateVar
                         (state
@@ -188,7 +189,7 @@ talk client redisConnection pubSubCtrl channelsVar stateVar = forever loop
               Nothing -> putStrLn "invalid leave room request"
               Just roomId ->
                 atomically $ do
-                  stmModifyTVar channelsVar (removeRoomChannel roomId)
+                  stmModifyTVar clientStateVar (removeRoomChannel roomId)
                   state <- readTVar stateVar
                   let rooms = (serverStateRooms state)
                   case M.lookup roomId rooms of
