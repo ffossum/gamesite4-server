@@ -1,5 +1,7 @@
 module Gamesite4.Domain.Room where
 
-newtype RoomId =
-  RoomId Int
+import Data.Text (Text)
+
+newtype RoomName =
+  RoomName Text
   deriving (Eq, Ord, Show)
