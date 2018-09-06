@@ -27,3 +27,18 @@ parseRoomName msg = rightToMaybe (parseOnly parser msg)
       _ <- char '#'
       rn <- takeWhile1 isValidChar
       pure $ RoomName rn
+
+data WsRoomMsg =
+  WsRoomMsg RoomName
+            Text
+  deriving (Show)
+
+parseWsRoomMsg :: Text -> Maybe WsRoomMsg
+parseWsRoomMsg msg = rightToMaybe (parseOnly parser msg)
+  where
+    parser = do
+      _ <- char '#'
+      roomName <- takeWhile1 isValidChar
+      _ <- char ' '
+      content <- takeText
+      pure $ WsRoomMsg (RoomName roomName) content

@@ -31,7 +31,12 @@ import qualified Data.Text.IO as T
 import qualified Database.Redis as R
 import Gamesite4.Domain.Room (RoomName(..))
 import Gamesite4.Domain.User
-import Gamesite4.Parsers (parseRoomName, parseUsername)
+import Gamesite4.Parsers
+  ( WsRoomMsg(..)
+  , parseRoomName
+  , parseUsername
+  , parseWsRoomMsg
+  )
 import qualified Network.WebSockets as WS
 import TextShow
 
@@ -65,17 +70,14 @@ data Client = Client
 
 handleUserRedisMsg ::
      R.PubSubController -> TChan ByteString -> Username -> IO () -> IO ()
-handleUserRedisMsg pubSubCtrl channel (Username username) action = do
-  T.putStrLn $ decodeUtf8 ("channelName: " <> channelName)
+handleUserRedisMsg pubSubCtrl channel (Username username) action =
   bracket
     (R.addChannels pubSubCtrl [(channelName, callback)] [])
     id
     (const action)
   where
     channelName = encodeUtf8 $ "user:" <> username
-    callback bytes = do
-      T.putStrLn $ "handleUserRedisMsg: " <> decodeUtf8 bytes
-      atomically $ writeTChan channel bytes
+    callback bytes = atomically $ writeTChan channel bytes
 
 getRoomNameFromRedisChannel :: ByteString -> Maybe RoomName
 getRoomNameFromRedisChannel = parseRoomName . decodeUtf8
@@ -157,7 +159,6 @@ respondForever client channelsState =
       atomically $ do
         ClientState pc rcs <- readTVar channelsState
         (decodeUtf8 <$> readTChan pc) `orElse` M.foldrWithKey f retry rcs
-    T.putStrLn $ "respondForever: " <> msg
     WS.sendTextData conn msg
   where
     f (RoomName rn) a b =
@@ -229,12 +230,21 @@ receiveForever client redisConnection pubSubCtrl clientStateVar stateVar =
                                    stateVar
                                    (state
                                       {serverStateRooms = M.delete roomId rooms})
-          | "room:" `T.isPrefixOf` msg -> do
-            _ <-
-              R.runRedis redisConnection $ R.publish "room:123" (encodeUtf8 msg)
-            pure ()
+          | "#" `T.isPrefixOf` msg ->
+            case parseWsRoomMsg msg of
+              Nothing -> pure ()
+              Just (WsRoomMsg roomName content) ->
+                R.runRedis
+                  redisConnection
+                  (R.publish
+                     (roomNameToRedisChannel roomName)
+                     (encodeUtf8 content)) *>
+                pure ()
           | "user:" `T.isPrefixOf` msg -> do
             _ <-
               R.runRedis redisConnection $ R.publish "user:123" (encodeUtf8 msg)
             pure ()
           | otherwise -> pure ()
+
+roomNameToRedisChannel :: RoomName -> ByteString
+roomNameToRedisChannel (RoomName rn) = "#" <> encodeUtf8 rn
