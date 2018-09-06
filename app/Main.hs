@@ -114,8 +114,9 @@ application redisConnection pubSubCtrl stateVar pending = do
   msg <- WS.receiveData conn
   case parseUsername msg of
     Nothing -> pure ()
-    Just username -> do
+    Just username@(Username rawUsername) -> do
       let client = Client username conn -- TODO client id
+      WS.sendTextData conn $ "welcome " <> rawUsername
       WS.forkPingThread conn 30
       personalBroadcastChan <- newBroadcastTChanIO
       personalChan <- atomically $ dupTChan personalBroadcastChan
