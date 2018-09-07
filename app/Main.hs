@@ -163,7 +163,7 @@ respondForever client channelsState =
     WS.sendTextData conn msg
   where
     f (RoomName rn) a b =
-      (("#" <> rn <> " ") <>) <$> (decodeUtf8 <$> readTChan a) `orElse` b
+      ((("#" <> rn <> " ") <>) <$> (decodeUtf8 <$> readTChan a)) `orElse` b
     conn = clientConnection client
 
 stmModifyTVar :: TVar a -> (a -> STM a) -> STM ()
