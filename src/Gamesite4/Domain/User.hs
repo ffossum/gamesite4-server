@@ -1,7 +1,7 @@
 module Gamesite4.Domain.User where
 
-import Data.Text (Text)
-import qualified Data.Text as T
+import           Data.Text                      ( Text )
+import qualified Data.Text                     as T
 
 newtype UserId =
   UserId Int
