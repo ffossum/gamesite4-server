@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 module Gamesite4.Parsers where
 
 import           Control.Applicative
@@ -28,8 +26,7 @@ parseRoomName msg = rightToMaybe (parseOnly parser msg)
     pure $ RoomName rn
 
 data WsRoomMsg =
-  WsRoomMsg RoomName
-            Text
+  WsRoomMsg RoomName Text
   deriving (Show)
 
 parseWsRoomMsg :: Text -> Maybe WsRoomMsg

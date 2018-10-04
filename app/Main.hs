@@ -98,8 +98,9 @@ main = do
   pubSubCtrl      <- R.newPubSubController [] [("#*", receiveGameMsgs stateVar)]
   T.putStrLn "Starting server"
   race_
-    ( WS.runServer "127.0.0.1" 9160
-    $ application redisConnection pubSubCtrl stateVar
+    (WS.runServer "127.0.0.1"
+                  9160
+                  (application redisConnection pubSubCtrl stateVar)
     )
     (R.pubSubForever redisConnection
                      pubSubCtrl
